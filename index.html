@@ -510,6 +510,24 @@
       background: #fef2f2;
     }
 
+    .shared-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #8b819d;
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .shared-meta::before {
+      width: 7px;
+      height: 7px;
+      content: "";
+      background: #22c55e;
+      border-radius: 50%;
+      box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.1);
+    }
+
     .empty-state {
       display: grid;
       min-height: 350px;
@@ -693,7 +711,7 @@
           </button>
         </form>
 
-        <p class="local-tip">留言保存在当前浏览器中。清除浏览器数据后，留言也会被删除。</p>
+        <p class="local-tip" id="setupTip">正在连接公共留言墙...</p>
       </section>
 
       <section class="wall glass-card" aria-labelledby="wallTitle">
@@ -722,9 +740,17 @@
     </footer>
   </div>
 
+﻿  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
-    const STORAGE_KEY = "anonymous-message-wall-v1";
+    // ============================================================
+    // 1. 在这里填写 Supabase 项目的 URL 和 anon public key
+    // 注意：只能填写 anon public key，不能填写 service_role key。
+    // ============================================================
+    const SUPABASE_URL = "https://cwnkkhudpgpakzrzyihn.supabase.co/rest/v1/";
+    const SUPABASE_ANON_KEY = "sb_publishable_l_8oAhU9vFigjUYndNnlRA_mKIGLRNw";
+    const TABLE_NAME = "messages";
     const MAX_LENGTH = 200;
+    const MAX_MESSAGES = 100;
 
     const messageForm = document.getElementById("messageForm");
     const messageInput = document.getElementById("messageInput");
@@ -733,6 +759,20 @@
     const messageList = document.getElementById("messageList");
     const messageCount = document.getElementById("messageCount");
     const emptyState = document.getElementById("emptyState");
+    const setupTip = document.getElementById("setupTip");
+
+    const supabaseLibraryReady =
+      typeof window.supabase !== "undefined" &&
+      typeof window.supabase.createClient === "function";
+
+    const isConfigured =
+      supabaseLibraryReady &&
+      SUPABASE_URL.startsWith("https://") &&
+      SUPABASE_ANON_KEY.length > 20;
+
+    const db = isConfigured
+      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+      : null;
 
     const avatarPalettes = [
       ["#8b5cf6", "#6366f1"],
@@ -743,33 +783,9 @@
       ["#a855f7", "#ec4899"]
     ];
 
-    let messages = loadMessages();
-
-    function loadMessages() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        const parsed = raw ? JSON.parse(raw) : [];
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (error) {
-        console.warn("读取留言失败：", error);
-        return [];
-      }
-    }
-
-    function saveMessages() {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
-      } catch (error) {
-        console.warn("保存留言失败：", error);
-      }
-    }
-
-    function createMessageId() {
-      if (window.crypto && typeof window.crypto.randomUUID === "function") {
-        return window.crypto.randomUUID();
-      }
-      return Date.now().toString(36) + Math.random().toString(36).slice(2);
-    }
+    let messages = [];
+    let isSubmitting = false;
+    let realtimeChannel = null;
 
     function formatTime(isoString) {
       const date = new Date(isoString);
@@ -787,71 +803,35 @@
     }
 
     function getAvatarStyle(id) {
+      const safeId = String(id || "anonymous");
       let hash = 0;
-      for (let i = 0; i < id.length; i += 1) {
-        hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+
+      for (let i = 0; i < safeId.length; i += 1) {
+        hash = (hash * 31 + safeId.charCodeAt(i)) >>> 0;
       }
 
       const palette = avatarPalettes[hash % avatarPalettes.length];
       return `--avatar-a:${palette[0]};--avatar-b:${palette[1]};`;
     }
 
+    function normalizeMessage(row) {
+      return {
+        id: row.id,
+        text: row.content || "",
+        mood: row.mood || "🌙 树洞",
+        createdAt: row.created_at || new Date().toISOString()
+      };
+    }
+
     function updateCounter() {
-      const length = messageInput.value.length;
-      messageCounter.textContent = `${length} / ${MAX_LENGTH}`;
-      publishButton.disabled = messageInput.value.trim().length === 0;
+      const text = messageInput.value.trim();
+      messageCounter.textContent = `${messageInput.value.length} / ${MAX_LENGTH}`;
+      publishButton.disabled = isSubmitting || !isConfigured || text.length === 0;
     }
 
     function getSelectedMood() {
       const selected = messageForm.querySelector('input[name="mood"]:checked');
       return selected ? selected.value : "🌙 树洞";
-    }
-
-    function createLikeButton(message) {
-      const button = document.createElement("button");
-      button.className = "like-button";
-      button.type = "button";
-      button.setAttribute("aria-label", "给这条留言点赞");
-
-      if (message.liked) {
-        button.classList.add("is-liked");
-      }
-
-      const heart = document.createElement("span");
-      heart.className = "like-heart";
-      heart.textContent = message.liked ? "♥" : "♡";
-      heart.setAttribute("aria-hidden", "true");
-
-      const count = document.createElement("span");
-      count.textContent = `${message.likes || 0}`;
-
-      button.append(heart, count);
-      button.addEventListener("click", () => {
-        message.liked = !message.liked;
-        message.likes = Math.max(0, (message.likes || 0) + (message.liked ? 1 : -1));
-        saveMessages();
-        renderMessages();
-      });
-
-      return button;
-    }
-
-    function createDeleteButton(messageId) {
-      const button = document.createElement("button");
-      button.className = "delete-button";
-      button.type = "button";
-      button.textContent = "删除";
-      button.setAttribute("aria-label", "删除这条留言");
-      button.addEventListener("click", () => {
-        const shouldDelete = window.confirm("确定要删除这条留言吗？");
-        if (!shouldDelete) {
-          return;
-        }
-        messages = messages.filter((message) => message.id !== messageId);
-        saveMessages();
-        renderMessages();
-      });
-      return button;
     }
 
     function createMessageCard(message, index) {
@@ -882,7 +862,7 @@
 
       const mood = document.createElement("span");
       mood.className = "mood-chip";
-      mood.textContent = message.mood || "🌙 树洞";
+      mood.textContent = message.mood;
 
       author.append(name, time, mood);
       top.append(avatar, author);
@@ -893,8 +873,12 @@
 
       const bottom = document.createElement("div");
       bottom.className = "message-bottom";
-      bottom.append(createLikeButton(message), createDeleteButton(message.id));
 
+      const sharedMeta = document.createElement("span");
+      sharedMeta.className = "shared-meta";
+      sharedMeta.textContent = "已同步到公共留言墙";
+
+      bottom.append(sharedMeta);
       card.append(top, text, bottom);
       return card;
     }
@@ -914,6 +898,73 @@
       });
     }
 
+    async function fetchMessages() {
+      const { data, error } = await db
+        .from(TABLE_NAME)
+        .select("id,content,mood,created_at")
+        .order("created_at", { ascending: false })
+        .limit(MAX_MESSAGES);
+
+      if (error) {
+        throw error;
+      }
+
+      return (data || []).map(normalizeMessage);
+    }
+
+    function subscribeToMessages() {
+      if (!db || realtimeChannel) {
+        return;
+      }
+
+      realtimeChannel = db
+        .channel("anonymous-message-wall")
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: TABLE_NAME
+          },
+          (payload) => {
+            const newMessage = normalizeMessage(payload.new);
+            const alreadyExists = messages.some((message) => message.id === newMessage.id);
+
+            if (!alreadyExists) {
+              messages.unshift(newMessage);
+              renderMessages();
+            }
+          }
+        )
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") {
+            setupTip.textContent = "已连接公共留言墙，新留言会实时同步。";
+          }
+        });
+    }
+
+    async function loadSharedMessages() {
+      if (!isConfigured) {
+        setupTip.textContent = supabaseLibraryReady
+          ? "请先在代码中填写 SUPABASE_URL 和 SUPABASE_ANON_KEY。"
+          : "Supabase 脚本加载失败，请检查网络或 CDN 地址。";
+        renderMessages();
+        return;
+      }
+
+      setupTip.textContent = "正在读取公共留言...";
+
+      try {
+        messages = await fetchMessages();
+        renderMessages();
+        subscribeToMessages();
+      } catch (error) {
+        console.error("读取留言失败：", error);
+        setupTip.textContent = `连接失败：${error.message}`;
+        renderMessages();
+      }
+    }
+
     messageInput.addEventListener("input", updateCounter);
 
     messageInput.addEventListener("keydown", (event) => {
@@ -925,34 +976,63 @@
       }
     });
 
-    messageForm.addEventListener("submit", (event) => {
+    messageForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const text = messageInput.value.trim();
 
+      if (!db) {
+        setupTip.textContent = "尚未连接 Supabase，暂时不能发布留言。";
+        return;
+      }
+
+      const text = messageInput.value.trim();
       if (!text) {
         messageInput.focus();
         return;
       }
 
-      messages.unshift({
-        id: createMessageId(),
-        text: text.slice(0, MAX_LENGTH),
-        mood: getSelectedMood(),
-        createdAt: new Date().toISOString(),
-        likes: 0,
-        liked: false
-      });
-
-      saveMessages();
-      messageInput.value = "";
+      isSubmitting = true;
       updateCounter();
-      renderMessages();
-      messageInput.focus();
+      setupTip.textContent = "正在发布留言...";
+
+      try {
+        const { data, error } = await db
+          .from(TABLE_NAME)
+          .insert({
+            content: text.slice(0, MAX_LENGTH),
+            mood: getSelectedMood()
+          })
+          .select("id,content,mood,created_at")
+          .single();
+
+        if (error) {
+          throw error;
+        }
+
+        const newMessage = normalizeMessage(data);
+        const alreadyExists = messages.some((message) => message.id === newMessage.id);
+
+        if (!alreadyExists) {
+          messages.unshift(newMessage);
+        }
+
+        messageInput.value = "";
+        setupTip.textContent = "留言发布成功，已经同步到公共留言墙。";
+        renderMessages();
+        messageInput.focus();
+      } catch (error) {
+        console.error("发布留言失败：", error);
+        setupTip.textContent = `发布失败：${error.message}`;
+      } finally {
+        isSubmitting = false;
+        updateCounter();
+      }
     });
 
     updateCounter();
     renderMessages();
+    loadSharedMessages();
   </script>
 </body>
 </html>
+
 
